@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Merton Model (D3)</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root { --bg:#fff; --fg:#111; --muted:#666; --card:#fff; --border:#ddd; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: var(--bg); color: var(--fg); }
+    .wrap { padding: 16px; max-width: 1200px; margin: 0 auto; }
+    h1 { font-size: 18px; margin: 0 0 12px 0; }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+      align-items: end;
+    }
+    .controls label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+    .controls input { padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; color: var(--fg); }
+    .controls .row { display:flex; gap:10px; align-items:center; }
+    button { padding: 9px 12px; border-radius: 12px; border: 1px solid #bbb; background: #f6f6f6; cursor:pointer; }
+    button:hover { background:#efefef; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 10px; }
+    .chart-title { font-weight: 650; font-size: 13px; margin: 4px 0 6px 2px; }
+    .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+    @media (max-width: 900px) {
+      .controls { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Merton Structural Credit Model — D3 (Pure JS)</h1>
+
+  <div class="controls">
+    <label>Horizon (years)
+      <input id="T" type="number" step="0.25" value="5">
+    </label>
+    <label>Risk-free rate r
+      <input id="r" type="number" step="0.001" value="0.04">
+    </label>
+    <label>Face debt D
+      <input id="D" type="number" step="10" value="3000">
+    </label>
+    <label>Base asset vol σA
+      <input id="sigmaA" type="number" step="0.005" value="0.15">
+    </label>
+    <label>Vol shock ±Δσ
+      <input id="shock" type="number" step="0.005" value="0.05">
+    </label>
+    <label>Market equity (E*)
+      <input id="E_mkt" type="number" step="10" value="2500">
+    </label>
+
+    <label>Asset range min
+      <input id="Amin" type="number" step="10" value="1500">
+    </label>
+    <label>Asset range max
+      <input id="Amax" type="number" step="10" value="12000">
+    </label>
+    <label>Grid points
+      <input id="k" type="number" step="10" value="120">
+    </label>
+
+    <label>Assumed current assets (A*)
+      <input id="Astar" type="number" step="10" value="6000">
+    </label>
+
+    <div class="row">
+      <button id="run">Run</button>
+      <button id="fit">Fit A* to E*</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="chart-title">Equity Value vs Asset Value</div>
+      <div id="c1"></div>
+    </div>
+    <div class="card">
+      <div class="chart-title">Equity Volatility vs Equity Value</div>
+      <div id="c2"></div>
+    </div>
+    <div class="card">
+      <div class="chart-title">Default Probability vs Equity Value</div>
+      <div id="c3"></div>
+    </div>
+    <div class="card">
+      <div class="chart-title">Debt Yield vs Equity Value</div>
+      <div id="c4"></div>
+    </div>
+  </div>
+
+  <div class="note">
+    Model: Equity is a call option on assets with strike D. Uses Black–Scholes style formulas for E(A),
+    equity vol, default probability, and implied debt yield. This is a teaching / intuition dashboard.
+  </div>
+</div>
+
+<script>
+/* ----------------------------- Math helpers ----------------------------- */
+
+// Error function approximation (Abramowitz-Stegun style)
+function erf(x) {
+  const sign = x >= 0 ? 1 : -1;
+  x = Math.abs(x);
+  const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429;
+  const p=0.3275911;
+  const t = 1/(1+p*x);
+  const y = 1 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*Math.exp(-x*x);
+  return sign*y;
+}
+
+function normCdf(x) {
+  return 0.5*(1 + erf(x/Math.SQRT2));
+}
+
+function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+/* --------------------------- Merton core formulas ------------------------ */
+/**
+ * d1 = [ln(A/D) + (r + 0.5 sigma^2)T]/(sigma sqrt(T))
+ * d2 = d1 - sigma sqrt(T)
+ * Equity value: E = A N(d1) - D e^{-rT} N(d2)
+ * Debt value:   B = A - E
+ * Default prob: P(default) = N(-d2)
+ *
+ * Equity volatility (delta * A/E * sigmaA), where delta = N(d1)
+ *   sigmaE = (A/E) * N(d1) * sigmaA
+ *
+ * Debt yield (continuous): y = -(1/T) ln(B/D)
+ * Debt yield premium: y - r
+ */
+function d1(A, D, sigma, r, T) {
+  const srt = sigma * Math.sqrt(T);
+  return (Math.log(A / D) + (r + 0.5*sigma*sigma)*T) / srt;
+}
+function d2(A, D, sigma, r, T) {
+  return d1(A,D,sigma,r,T) - sigma*Math.sqrt(T);
+}
+
+function equityValue(A, D, sigma, r, T) {
+  const _d1 = d1(A,D,sigma,r,T);
+  const _d2 = _d1 - sigma*Math.sqrt(T);
+  return A*normCdf(_d1) - D*Math.exp(-r*T)*normCdf(_d2);
+}
+
+function defaultProb(A, D, sigma, r, T) {
+  const _d2 = d2(A,D,sigma,r,T);
+  return normCdf(-_d2);
+}
+
+function equityVol(A, D, sigmaA, r, T) {
+  const E = equityValue(A,D,sigmaA,r,T);
+  if (E <= 1e-9) return NaN;
+  const delta = normCdf(d1(A,D,sigmaA,r,T));
+  return (A/E) * delta * sigmaA;
+}
+
+function debtValue(A, D, sigma, r, T) {
+  const E = equityValue(A,D,sigma,r,T);
+  return A - E;
+}
+
+function debtYield(A, D, sigma, r, T) {
+  const B = debtValue(A,D,sigma,r,T);
+  if (B <= 1e-12) return NaN;
+  const y = -(1/T) * Math.log(B / D);
+  return y; // continuous
+}
+
+/* ----------------------------- Curve builder ----------------------------- */
+
+function linspace(a, b, n) {
+  const out = [];
+  const step = (b-a)/n;
+  for (let i=0;i<=n;i++) out.push(a + i*step);
+  return out;
+}
+
+function buildCurves(params) {
+  const {T,r,D,sigmaA,shock,E_mkt,Amin,Amax,k,Astar} = params;
+
+  const sigLo = Math.max(1e-6, sigmaA - shock);
+  const sigHi = sigmaA + shock;
+
+  const Agrid = linspace(Amin, Amax, k);
+
+  // Panel 1: x = A, y = E
+  function series_E_vs_A(sig, name) {
+    return {
+      name,
+      pts: Agrid.map(A => ({x:A, y: equityValue(A,D,sig,r,T)}))
+    };
+  }
+
+  const s1 = [
+    series_E_vs_A(sigmaA, "Base"),
+    series_E_vs_A(sigHi, "+Shock"),
+    series_E_vs_A(sigLo, "-Shock")
+  ];
+
+  // Panel 2: x = E, y = sigmaE
+  function series_volE_vs_E(sig, name) {
+    return {
+      name,
+      pts: Agrid.map(A => {
+        const E = equityValue(A,D,sig,r,T);
+        const v = equityVol(A,D,sig,r,T);
+        return {x:E, y:v};
+      }).filter(p => Number.isFinite(p.y) && p.x > 0)
+    };
+  }
+  const s2 = [
+    series_volE_vs_E(sigmaA, "Base"),
+    series_volE_vs_E(sigHi, "+Shock"),
+    series_volE_vs_E(sigLo, "-Shock")
+  ];
+
+  // Panel 3: x = E, y = PD
+  function series_PD_vs_E(sig, name) {
+    return {
+      name,
+      pts: Agrid.map(A => {
+        const E = equityValue(A,D,sig,r,T);
+        const pd = defaultProb(A,D,sig,r,T);
+        return {x:E, y:pd};
+      }).filter(p => p.x > 0)
+    };
+  }
+  const s3 = [
+    series_PD_vs_E(sigmaA, "Base"),
+    series_PD_vs_E(sigHi, "+Shock"),
+    series_PD_vs_E(sigLo, "-Shock")
+  ];
+
+  // Panel 4: x = E, y = debt yield (as %)
+  function series_debtYield_vs_E(sig, name) {
+    return {
+      name,
+      pts: Agrid.map(A => {
+        const E = equityValue(A,D,sig,r,T);
+        const y = debtYield(A,D,sig,r,T);
+        return {x:E, y: 100*y};
+      }).filter(p => Number.isFinite(p.y) && p.x > 0)
+    };
+  }
+  const s4 = [
+    series_debtYield_vs_E(sigmaA, "Base"),
+    series_debtYield_vs_E(sigHi, "+Shock"),
+    series_debtYield_vs_E(sigLo, "-Shock")
+  ];
+
+  // Helper values
+  const E_star = equityValue(Astar, D, sigmaA, r, T);
+  const pd_star = defaultProb(Astar, D, sigmaA, r, T);
+  const volE_star = equityVol(Astar, D, sigmaA, r, T);
+  const y_star = debtYield(Astar, D, sigmaA, r, T);
+
+  return {
+    panels: [
+      { id:"c1", xLabel:"Asset Value (A)", yLabel:"Equity Value (E)", series:s1, vline:Astar, hline:E_mkt },
+      { id:"c2", xLabel:"Equity Value (E)", yLabel:"Equity Vol (σE)", series:s2, vline:E_mkt },
+      { id:"c3", xLabel:"Equity Value (E)", yLabel:"Default Prob P(default)", series:s3, vline:E_mkt },
+      { id:"c4", xLabel:"Equity Value (E)", yLabel:"Debt Yield (%, cont.)", series:s4, vline:E_mkt }
+    ],
+    snapshot: { E_star, pd_star, volE_star, y_star }
+  };
+}
+
+/* ------------------------------ D3 charting ------------------------------ */
+
+function renderLineChart(container, cfg, opts = {}) {
+  const width = opts.width ?? 520;
+  const height = opts.height ?? 320;
+  const margin = {top: 12, right: 16, bottom: 42, left: 58};
+
+  container.innerHTML = "";
+
+  const svg = d3.select(container).append("svg")
+    .attr("width", width)
+    .attr("height", height);
+
+  const w = width - margin.left - margin.right;
+  const h = height - margin.top - margin.bottom;
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const allPts = cfg.series.flatMap(s => s.pts);
+  const xExtent = d3.extent(allPts, d => d.x);
+  const yExtent = d3.extent(allPts, d => d.y);
+
+  const xPad = (xExtent[1]-xExtent[0]) * 0.03 || 1;
+  const yPad = (yExtent[1]-yExtent[0]) * 0.06 || 1;
+
+  const x = d3.scaleLinear().domain([xExtent[0]-xPad, xExtent[1]+xPad]).range([0, w]);
+  const y = d3.scaleLinear().domain([yExtent[0]-yPad, yExtent[1]+yPad]).range([h, 0]);
+
+  g.append("g").attr("transform", `translate(0,${h})`).call(d3.axisBottom(x).ticks(6));
+  g.append("g").call(d3.axisLeft(y).ticks(6));
+
+  // axis labels
+  svg.append("text")
+    .attr("x", margin.left + w/2)
+    .attr("y", height - 10)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 12)
+    .text(cfg.xLabel);
+
+  svg.append("text")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -(margin.top + h/2))
+    .attr("y", 14)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 12)
+    .text(cfg.yLabel);
+
+  // helper lines
+  if (cfg.vline != null) {
+    g.append("line")
+      .attr("x1", x(cfg.vline)).attr("x2", x(cfg.vline))
+      .attr("y1", 0).attr("y2", h)
+      .attr("stroke", "#999")
+      .attr("stroke-dasharray", "4,3");
+  }
+  if (cfg.hline != null) {
+    g.append("line")
+      .attr("x1", 0).attr("x2", w)
+      .attr("y1", y(cfg.hline)).attr("y2", y(cfg.hline))
+      .attr("stroke", "#999")
+      .attr("stroke-dasharray", "4,3");
+  }
+
+  const color = d3.scaleOrdinal(d3.schemeTableau10)
+    .domain(cfg.series.map(s => s.name));
+
+  const line = d3.line()
+    .x(d => x(d.x))
+    .y(d => y(d.y));
+
+  g.selectAll("path.series")
+    .data(cfg.series)
+    .enter()
+    .append("path")
+    .attr("class","series")
+    .attr("fill","none")
+    .attr("stroke", d => color(d.name))
+    .attr("stroke-width", 2)
+    .attr("d", d => line(d.pts));
+
+  // legend
+  const legend = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  const items = legend.selectAll("g.item").data(cfg.series).enter().append("g")
+    .attr("class","item")
+    .attr("transform", (d,i) => `translate(${i*110},0)`);
+
+  items.append("rect")
+    .attr("x", 0).attr("y", 0)
+    .attr("width", 10).attr("height", 10)
+    .attr("fill", d => color(d.name));
+
+  items.append("text")
+    .attr("x", 14).attr("y", 9)
+    .attr("font-size", 11)
+    .text(d => d.name);
+}
+
+/* ------------------------------ Fit routine ------------------------------ */
+/**
+ * Fit A* such that E(A*) ~= E_mkt (holding D, sigmaA, r, T fixed).
+ * Uses bisection on [Amin, Amax] (monotonic in A).
+ */
+function fitAssetToMarket(params) {
+  let {Amin,Amax} = params;
+  const {T,r,D,sigmaA,E_mkt} = params;
+
+  const f = (A) => equityValue(A,D,sigmaA,r,T) - E_mkt;
+
+  // Ensure bracket (expand if needed)
+  let lo = Amin, hi = Amax;
+  let flo = f(lo), fhi = f(hi);
+
+  // If not bracketed, try expanding a bit
+  for (let i=0; i<20 && flo*fhi>0; i++) {
+    lo = Math.max(1e-6, lo * 0.8);
+    hi = hi * 1.25;
+    flo = f(lo); fhi = f(hi);
+  }
+  if (flo*fhi>0) return null;
+
+  for (let it=0; it<70; it++) {
+    const mid = 0.5*(lo+hi);
+    const fmid = f(mid);
+    if (Math.abs(fmid) < 1e-6) return mid;
+    if (flo*fmid <= 0) { hi = mid; fhi = fmid; }
+    else { lo = mid; flo = fmid; }
+  }
+  return 0.5*(lo+hi);
+}
+
+/* --------------------------------- App ---------------------------------- */
+
+function readParams() {
+  const get = (id) => Number(document.getElementById(id).value);
+  return {
+    T: get("T"),
+    r: get("r"),
+    D: get("D"),
+    sigmaA: get("sigmaA"),
+    shock: get("shock"),
+    E_mkt: get("E_mkt"),
+    Amin: get("Amin"),
+    Amax: get("Amax"),
+    k: Math.max(30, Math.floor(get("k"))),
+    Astar: get("Astar")
+  };
+}
+
+function run() {
+  const params = readParams();
+  const {panels, snapshot} = buildCurves(params);
+
+  for (const p of panels) {
+    const el = document.getElementById(p.id);
+    renderLineChart(el, p, {width: el.parentElement.clientWidth - 20, height: 320});
+  }
+
+  // Optional: reflect some computed values (console)
+  console.log("Snapshot @ A*:", snapshot);
+}
+
+document.getElementById("run").addEventListener("click", run);
+
+document.getElementById("fit").addEventListener("click", () => {
+  const params = readParams();
+  const Afit = fitAssetToMarket(params);
+  if (Afit == null) {
+    alert("Could not bracket a solution for A* in [Amin, Amax]. Try widening the asset range.");
+    return;
+  }
+  document.getElementById("Astar").value = Math.round(Afit);
+  run();
+});
+
+// initial render
+run();
+</script>
+</body>
+</html>
