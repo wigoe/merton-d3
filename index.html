@@ -292,6 +292,31 @@ function buildCurves(params) {
   return { panels, snapshot: {E_star, pd_star, volE_star, y_star, spr_star} };
 }
 
+function bisectByX(points, x) {
+  // points must be sorted by .x
+  let lo = 0, hi = points.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].x < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function nearestPoint(points, x) {
+  if (!points || points.length === 0) return null;
+  const i = bisectByX(points, x);
+  if (i <= 0) return points[0];
+  if (i >= points.length) return points[points.length - 1];
+  const a = points[i - 1], b = points[i];
+  return (Math.abs(a.x - x) <= Math.abs(b.x - x)) ? a : b;
+}
+
+function fmtTooltipNumber(x, dp=2) {
+  if (!Number.isFinite(x)) return "—";
+  return x.toLocaleString(undefined, { maximumFractionDigits: dp, minimumFractionDigits: dp });
+}
+  
 /* ------------------------------ D3 charting ------------------------------ */
 
 function renderLineChart(container, cfg, opts = {}) {
@@ -404,45 +429,78 @@ const tooltip = d3.select(container)
 
   items.append("rect").attr("x", 0).attr("y", 0).attr("width", 10).attr("height", 10).attr("fill", d => color(d.name));
   items.append("text").attr("x", 14).attr("y", 9).attr("font-size", 11).text(d => d.name);
-}
+
+  // choose Base series for tooltip snapping
+const baseSeries = cfg.series.find(s => s.name === "Base") || cfg.series[0];
+const basePts = baseSeries.pts; // assumed sorted by x (it is in our build)
+  
+ // Make container a positioning context for the tooltip
+d3.select(container).style("position", "relative");
 
 overlay
   .on("mousemove", function(event) {
-
-    const [mx, my] = d3.pointer(event);
+    // pointer relative to the plotting group "g"
+    const [mx, my] = d3.pointer(event, g.node());
+    if (mx < 0 || mx > w || my < 0 || my > h) return;
 
     const xv = x.invert(mx);
-    const yv = y.invert(my);
+
+    // snap to nearest point on Base series
+    const p = nearestPoint(basePts, xv);
+    if (!p) return;
+
+    // move crosshair to snapped point
+    const sx = x(p.x);
+    const sy = y(p.y);
 
     crossV
       .style("display", null)
-      .attr("x1", mx)
-      .attr("x2", mx)
-      .attr("y1", 0)
-      .attr("y2", h);
+      .attr("x1", sx).attr("x2", sx)
+      .attr("y1", 0).attr("y2", h);
 
     crossH
       .style("display", null)
-      .attr("x1", 0)
-      .attr("x2", w)
-      .attr("y1", my)
-      .attr("y2", my);
+      .attr("x1", 0).attr("x2", w)
+      .attr("y1", sy).attr("y2", sy);
+
+    // tooltip position relative to svg
+    const [tx, ty] = d3.pointer(event, svg.node());
+
+    // panel-specific labels
+    let line1 = "", line2 = "";
+    if (cfg.id === "c1") {
+      line1 = `A: ${fmtTooltipNumber(p.x, 0)}`;
+      line2 = `E(A): ${fmtTooltipNumber(p.y, 2)}`;
+    } else if (cfg.id === "c2") {
+      line1 = `E: ${fmtTooltipNumber(p.x, 2)}`;
+      line2 = `σE: ${fmtTooltipNumber(p.y * 100, 2)}%`;
+    } else if (cfg.id === "c3") {
+      line1 = `E: ${fmtTooltipNumber(p.x, 2)}`;
+      line2 = `P(default): ${fmtTooltipNumber(p.y * 100, 2)}%`;
+    } else if (cfg.id === "c4") {
+      line1 = `E: ${fmtTooltipNumber(p.x, 2)}`;
+      const label = (cfg.yLabel || "").includes("Yield") ? "Yield" : "Spread";
+      // p.y already in percent for panel 4
+      line2 = `${label}: ${fmtTooltipNumber(p.y, 2)}%`;
+    } else {
+      line1 = `x: ${fmtTooltipNumber(p.x, 2)}`;
+      line2 = `y: ${fmtTooltipNumber(p.y, 4)}`;
+    }
 
     tooltip
       .style("display", null)
-      .style("left", (event.offsetX + 15) + "px")
-      .style("top", (event.offsetY + 10) + "px")
-      .html(
-        "x: " + xv.toFixed(2) +
-        "<br>y: " + yv.toFixed(4)
-      );
-
+      .style("left", (tx + 12) + "px")
+      .style("top",  (ty + 12) + "px")
+      .html(`${line1}<br>${line2}`);
   })
   .on("mouseout", function() {
     crossV.style("display","none");
     crossH.style("display","none");
     tooltip.style("display","none");
-  });  
+  });
+
+}
+
 
   
 /* ------------------------------ Fit routine ------------------------------ */
