@@ -52,6 +52,7 @@
   <div class="topbar">
     <div>
       <h1>Merton Structural Credit Model — D3 (Pure JS)</h1>
+      <button id="copyLink">Copy share link</button>
       <div class="sub">
         Equity is modeled as a call option on firm assets (strike = face debt). This page plots leverage effects on equity vol, default probability, and debt pricing.
         &nbsp;•&nbsp;
@@ -542,6 +543,45 @@ function run() {
   renderReadout(params, snapshot);
 }
 
+  function encodeStateToUrl() {
+  const p = readParams();
+  const q = new URLSearchParams({
+    T: p.T, r: p.r, D: p.D, sigmaA: p.sigmaA, shock: p.shock,
+    E_mkt: p.E_mkt, Amin: p.Amin, Amax: p.Amax, k: p.k, Astar: p.Astar,
+    showYield: p.showYield ? "1" : "0"
+  });
+  const url = `${location.origin}${location.pathname}?${q.toString()}`;
+  return url;
+}
+
+function loadStateFromUrl() {
+  const q = new URLSearchParams(location.search);
+  const set = (id, v) => { if (v != null) document.getElementById(id).value = v; };
+  set("T", q.get("T"));
+  set("r", q.get("r"));
+  set("D", q.get("D"));
+  set("sigmaA", q.get("sigmaA"));
+  if (q.get("shock") != null) document.getElementById("shock").value = q.get("shock");
+  set("E_mkt", q.get("E_mkt"));
+  set("Amin", q.get("Amin"));
+  set("Amax", q.get("Amax"));
+  set("k", q.get("k"));
+  set("Astar", q.get("Astar"));
+  document.getElementById("showYield").checked = q.get("showYield") === "1";
+  document.getElementById("shockVal").textContent = Number(document.getElementById("shock").value).toFixed(3);
+}
+
+document.getElementById("copyLink").addEventListener("click", async () => {
+  const url = encodeStateToUrl();
+  await navigator.clipboard.writeText(url);
+  alert("Share link copied to clipboard.");
+});
+
+// call this before first run()
+loadStateFromUrl();
+run();
+
+  
 document.getElementById("run").addEventListener("click", run);
 
 document.getElementById("fit").addEventListener("click", () => {
