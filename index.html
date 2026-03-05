@@ -3,13 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Merton Model (D3)</title>
+  <title>Merton Structural Credit Model — D3 (Pure JS)</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
-    :root { --bg:#fff; --fg:#111; --muted:#666; --card:#fff; --border:#ddd; }
+    :root { --bg:#fff; --fg:#111; --muted:#666; --card:#fff; --border:#ddd; --pill:#f6f6f6; }
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: var(--bg); color: var(--fg); }
-    .wrap { padding: 16px; max-width: 1200px; margin: 0 auto; }
-    h1 { font-size: 18px; margin: 0 0 12px 0; }
+    .wrap { padding: 16px; max-width: 1240px; margin: 0 auto; }
+    .topbar { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+    h1 { font-size: 18px; margin: 0 0 6px 0; }
+    .sub { font-size: 12px; color: var(--muted); margin: 0 0 12px 0; }
+    .sub a { color: inherit; }
     .controls {
       display: grid;
       grid-template-columns: repeat(6, minmax(150px, 1fr));
@@ -18,15 +21,27 @@
       align-items: end;
     }
     .controls label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
-    .controls input { padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; color: var(--fg); }
-    .controls .row { display:flex; gap:10px; align-items:center; }
+    .controls input[type="number"], .controls input[type="text"] {
+      padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px;
+      font-size: 13px; color: var(--fg); background: #fff;
+    }
+    .controls input[type="range"] { width: 100%; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .pill { padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--pill); font-size: 12px; color: var(--fg); }
     button { padding: 9px 12px; border-radius: 12px; border: 1px solid #bbb; background: #f6f6f6; cursor:pointer; }
     button:hover { background:#efefef; }
     .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 10px; }
     .chart-title { font-weight: 650; font-size: 13px; margin: 4px 0 6px 2px; }
-    .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
-    @media (max-width: 900px) {
+    .note { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.35; }
+    .readout {
+      display:flex; gap:10px; flex-wrap:wrap; margin: 10px 0 14px 0;
+    }
+    .kv { border:1px solid var(--border); border-radius: 12px; padding: 8px 10px; background:#fff; min-width: 170px; }
+    .kv .k { font-size: 11px; color: var(--muted); }
+    .kv .v { font-size: 14px; font-weight: 650; margin-top: 2px; }
+    .warn { color: #8a5a00; }
+    @media (max-width: 980px) {
       .controls { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
       .grid { grid-template-columns: 1fr; }
     }
@@ -34,7 +49,20 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Merton Structural Credit Model — D3 (Pure JS)</h1>
+  <div class="topbar">
+    <div>
+      <h1>Merton Structural Credit Model — D3 (Pure JS)</h1>
+      <div class="sub">
+        Equity is modeled as a call option on firm assets (strike = face debt). This page plots leverage effects on equity vol, default probability, and debt pricing.
+        &nbsp;•&nbsp;
+        Repo: <a href="https://github.com/wigoe/merton-d3" target="_blank" rel="noreferrer">github.com/wigoe/merton-d3</a>
+      </div>
+    </div>
+    <div class="row">
+      <span class="pill" id="marketStatus">Market data: not loaded</span>
+      <button id="loadMkt">Load market data (SPY, VIX, US10Y)</button>
+    </div>
+  </div>
 
   <div class="controls">
     <label>Horizon (years)
@@ -49,9 +77,11 @@
     <label>Base asset vol σA
       <input id="sigmaA" type="number" step="0.005" value="0.15">
     </label>
-    <label>Vol shock ±Δσ
-      <input id="shock" type="number" step="0.005" value="0.05">
+
+    <label>Vol shock ±Δσ <span class="pill" id="shockVal">0.050</span>
+      <input id="shock" type="range" min="0.00" max="0.30" step="0.005" value="0.05">
     </label>
+
     <label>Market equity (E*)
       <input id="E_mkt" type="number" step="10" value="2500">
     </label>
@@ -65,9 +95,13 @@
     <label>Grid points
       <input id="k" type="number" step="10" value="120">
     </label>
-
     <label>Assumed current assets (A*)
       <input id="Astar" type="number" step="10" value="6000">
+    </label>
+
+    <label class="row" style="gap:8px; align-items:center;">
+      <input id="showYield" type="checkbox">
+      <span>Show debt yield (otherwise spread)</span>
     </label>
 
     <div class="row">
@@ -75,6 +109,8 @@
       <button id="fit">Fit A* to E*</button>
     </div>
   </div>
+
+  <div class="readout" id="readout"></div>
 
   <div class="grid">
     <div class="card">
@@ -90,14 +126,14 @@
       <div id="c3"></div>
     </div>
     <div class="card">
-      <div class="chart-title">Debt Yield vs Equity Value</div>
+      <div class="chart-title" id="c4title">Credit Spread vs Equity Value</div>
       <div id="c4"></div>
     </div>
   </div>
 
   <div class="note">
-    Model: Equity is a call option on assets with strike D. Uses Black–Scholes style formulas for E(A),
-    equity vol, default probability, and implied debt yield. This is a teaching / intuition dashboard.
+    <b>Market data note:</b> This demo can pull SPY/VIX/US10Y in-browser from Stooq (no API key). It’s meant for quick intuition.
+    For production-quality feeds (SPX, real-time), you’d typically use a paid API or a small proxy to avoid CORS and rate limits.
   </div>
 </div>
 
@@ -114,26 +150,31 @@ function erf(x) {
   const y = 1 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*Math.exp(-x*x);
   return sign*y;
 }
-
-function normCdf(x) {
-  return 0.5*(1 + erf(x/Math.SQRT2));
-}
-
+function normCdf(x) { return 0.5*(1 + erf(x/Math.SQRT2)); }
 function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+function fmt(x, dp=4) {
+  if (!Number.isFinite(x)) return "—";
+  return x.toFixed(dp);
+}
+function fmtPct(x, dp=2) {
+  if (!Number.isFinite(x)) return "—";
+  return (100*x).toFixed(dp) + "%";
+}
+function fmtNum(x, dp=0) {
+  if (!Number.isFinite(x)) return "—";
+  return x.toLocaleString(undefined, {maximumFractionDigits: dp, minimumFractionDigits: dp});
+}
 
 /* --------------------------- Merton core formulas ------------------------ */
 /**
  * d1 = [ln(A/D) + (r + 0.5 sigma^2)T]/(sigma sqrt(T))
  * d2 = d1 - sigma sqrt(T)
  * Equity value: E = A N(d1) - D e^{-rT} N(d2)
- * Debt value:   B = A - E
  * Default prob: P(default) = N(-d2)
- *
- * Equity volatility (delta * A/E * sigmaA), where delta = N(d1)
- *   sigmaE = (A/E) * N(d1) * sigmaA
- *
- * Debt yield (continuous): y = -(1/T) ln(B/D)
- * Debt yield premium: y - r
+ * Equity vol:   sigmaE = (A/E)*N(d1)*sigmaA
+ * Debt value:   B = A - E
+ * Debt yield (cont): y = -(1/T) ln(B/D)
+ * Credit spread: (y - r)
  */
 function d1(A, D, sigma, r, T) {
   const srt = sigma * Math.sqrt(T);
@@ -142,35 +183,31 @@ function d1(A, D, sigma, r, T) {
 function d2(A, D, sigma, r, T) {
   return d1(A,D,sigma,r,T) - sigma*Math.sqrt(T);
 }
-
 function equityValue(A, D, sigma, r, T) {
   const _d1 = d1(A,D,sigma,r,T);
   const _d2 = _d1 - sigma*Math.sqrt(T);
   return A*normCdf(_d1) - D*Math.exp(-r*T)*normCdf(_d2);
 }
-
 function defaultProb(A, D, sigma, r, T) {
-  const _d2 = d2(A,D,sigma,r,T);
-  return normCdf(-_d2);
+  return normCdf(-d2(A,D,sigma,r,T));
 }
-
 function equityVol(A, D, sigmaA, r, T) {
   const E = equityValue(A,D,sigmaA,r,T);
   if (E <= 1e-9) return NaN;
   const delta = normCdf(d1(A,D,sigmaA,r,T));
   return (A/E) * delta * sigmaA;
 }
-
 function debtValue(A, D, sigma, r, T) {
-  const E = equityValue(A,D,sigma,r,T);
-  return A - E;
+  return A - equityValue(A,D,sigma,r,T);
 }
-
 function debtYield(A, D, sigma, r, T) {
   const B = debtValue(A,D,sigma,r,T);
   if (B <= 1e-12) return NaN;
-  const y = -(1/T) * Math.log(B / D);
-  return y; // continuous
+  return -(1/T) * Math.log(B / D);
+}
+function creditSpread(A, D, sigma, r, T) {
+  const y = debtYield(A,D,sigma,r,T);
+  return y - r;
 }
 
 /* ----------------------------- Curve builder ----------------------------- */
@@ -183,29 +220,16 @@ function linspace(a, b, n) {
 }
 
 function buildCurves(params) {
-  const {T,r,D,sigmaA,shock,E_mkt,Amin,Amax,k,Astar} = params;
+  const {T,r,D,sigmaA,shock,E_mkt,Amin,Amax,k,Astar, showYield} = params;
 
   const sigLo = Math.max(1e-6, sigmaA - shock);
   const sigHi = sigmaA + shock;
-
   const Agrid = linspace(Amin, Amax, k);
 
-  // Panel 1: x = A, y = E
-  function series_E_vs_A(sig, name) {
-    return {
-      name,
-      pts: Agrid.map(A => ({x:A, y: equityValue(A,D,sig,r,T)}))
-    };
+  function s_E_vs_A(sig, name) {
+    return { name, pts: Agrid.map(A => ({x:A, y: equityValue(A,D,sig,r,T)})) };
   }
-
-  const s1 = [
-    series_E_vs_A(sigmaA, "Base"),
-    series_E_vs_A(sigHi, "+Shock"),
-    series_E_vs_A(sigLo, "-Shock")
-  ];
-
-  // Panel 2: x = E, y = sigmaE
-  function series_volE_vs_E(sig, name) {
+  function s_volE_vs_E(sig, name) {
     return {
       name,
       pts: Agrid.map(A => {
@@ -215,14 +239,7 @@ function buildCurves(params) {
       }).filter(p => Number.isFinite(p.y) && p.x > 0)
     };
   }
-  const s2 = [
-    series_volE_vs_E(sigmaA, "Base"),
-    series_volE_vs_E(sigHi, "+Shock"),
-    series_volE_vs_E(sigLo, "-Shock")
-  ];
-
-  // Panel 3: x = E, y = PD
-  function series_PD_vs_E(sig, name) {
+  function s_PD_vs_E(sig, name) {
     return {
       name,
       pts: Agrid.map(A => {
@@ -232,44 +249,46 @@ function buildCurves(params) {
       }).filter(p => p.x > 0)
     };
   }
-  const s3 = [
-    series_PD_vs_E(sigmaA, "Base"),
-    series_PD_vs_E(sigHi, "+Shock"),
-    series_PD_vs_E(sigLo, "-Shock")
-  ];
-
-  // Panel 4: x = E, y = debt yield (as %)
-  function series_debtYield_vs_E(sig, name) {
+  function s_Yield_or_Spread_vs_E(sig, name) {
     return {
       name,
       pts: Agrid.map(A => {
         const E = equityValue(A,D,sig,r,T);
-        const y = debtYield(A,D,sig,r,T);
+        const y = showYield ? debtYield(A,D,sig,r,T) : creditSpread(A,D,sig,r,T);
         return {x:E, y: 100*y};
       }).filter(p => Number.isFinite(p.y) && p.x > 0)
     };
   }
-  const s4 = [
-    series_debtYield_vs_E(sigmaA, "Base"),
-    series_debtYield_vs_E(sigHi, "+Shock"),
-    series_debtYield_vs_E(sigLo, "-Shock")
+
+  const base = "Base", up = "+Shock", dn = "-Shock";
+
+  const panels = [
+    { id:"c1", xLabel:"Asset Value (A)", yLabel:"Equity Value (E)",
+      series:[s_E_vs_A(sigmaA, base), s_E_vs_A(sigHi, up), s_E_vs_A(sigLo, dn)],
+      vline:Astar, hline:E_mkt
+    },
+    { id:"c2", xLabel:"Equity Value (E)", yLabel:"Equity Vol (σE)",
+      series:[s_volE_vs_E(sigmaA, base), s_volE_vs_E(sigHi, up), s_volE_vs_E(sigLo, dn)],
+      vline:E_mkt
+    },
+    { id:"c3", xLabel:"Equity Value (E)", yLabel:"Default Prob P(default)",
+      series:[s_PD_vs_E(sigmaA, base), s_PD_vs_E(sigHi, up), s_PD_vs_E(sigLo, dn)],
+      vline:E_mkt
+    },
+    { id:"c4", xLabel:"Equity Value (E)", yLabel: showYield ? "Debt Yield (%, cont.)" : "Credit Spread (%, cont.)",
+      series:[s_Yield_or_Spread_vs_E(sigmaA, base), s_Yield_or_Spread_vs_E(sigHi, up), s_Yield_or_Spread_vs_E(sigLo, dn)],
+      vline:E_mkt
+    }
   ];
 
-  // Helper values
+  // Snapshot at A*
   const E_star = equityValue(Astar, D, sigmaA, r, T);
   const pd_star = defaultProb(Astar, D, sigmaA, r, T);
   const volE_star = equityVol(Astar, D, sigmaA, r, T);
   const y_star = debtYield(Astar, D, sigmaA, r, T);
+  const spr_star = creditSpread(Astar, D, sigmaA, r, T);
 
-  return {
-    panels: [
-      { id:"c1", xLabel:"Asset Value (A)", yLabel:"Equity Value (E)", series:s1, vline:Astar, hline:E_mkt },
-      { id:"c2", xLabel:"Equity Value (E)", yLabel:"Equity Vol (σE)", series:s2, vline:E_mkt },
-      { id:"c3", xLabel:"Equity Value (E)", yLabel:"Default Prob P(default)", series:s3, vline:E_mkt },
-      { id:"c4", xLabel:"Equity Value (E)", yLabel:"Debt Yield (%, cont.)", series:s4, vline:E_mkt }
-    ],
-    snapshot: { E_star, pd_star, volE_star, y_star }
-  };
+  return { panels, snapshot: {E_star, pd_star, volE_star, y_star, spr_star} };
 }
 
 /* ------------------------------ D3 charting ------------------------------ */
@@ -277,7 +296,7 @@ function buildCurves(params) {
 function renderLineChart(container, cfg, opts = {}) {
   const width = opts.width ?? 520;
   const height = opts.height ?? 320;
-  const margin = {top: 12, right: 16, bottom: 42, left: 58};
+  const margin = {top: 14, right: 16, bottom: 42, left: 58};
 
   container.innerHTML = "";
 
@@ -335,8 +354,7 @@ function renderLineChart(container, cfg, opts = {}) {
       .attr("stroke-dasharray", "4,3");
   }
 
-  const color = d3.scaleOrdinal(d3.schemeTableau10)
-    .domain(cfg.series.map(s => s.name));
+  const color = d3.scaleOrdinal(d3.schemeTableau10).domain(cfg.series.map(s => s.name));
 
   const line = d3.line()
     .x(d => x(d.x))
@@ -358,15 +376,8 @@ function renderLineChart(container, cfg, opts = {}) {
     .attr("class","item")
     .attr("transform", (d,i) => `translate(${i*110},0)`);
 
-  items.append("rect")
-    .attr("x", 0).attr("y", 0)
-    .attr("width", 10).attr("height", 10)
-    .attr("fill", d => color(d.name));
-
-  items.append("text")
-    .attr("x", 14).attr("y", 9)
-    .attr("font-size", 11)
-    .text(d => d.name);
+  items.append("rect").attr("x", 0).attr("y", 0).attr("width", 10).attr("height", 10).attr("fill", d => color(d.name));
+  items.append("text").attr("x", 14).attr("y", 9).attr("font-size", 11).text(d => d.name);
 }
 
 /* ------------------------------ Fit routine ------------------------------ */
@@ -377,14 +388,11 @@ function renderLineChart(container, cfg, opts = {}) {
 function fitAssetToMarket(params) {
   let {Amin,Amax} = params;
   const {T,r,D,sigmaA,E_mkt} = params;
-
   const f = (A) => equityValue(A,D,sigmaA,r,T) - E_mkt;
 
-  // Ensure bracket (expand if needed)
   let lo = Amin, hi = Amax;
   let flo = f(lo), fhi = f(hi);
 
-  // If not bracketed, try expanding a bit
   for (let i=0; i<20 && flo*fhi>0; i++) {
     lo = Math.max(1e-6, lo * 0.8);
     hi = hi * 1.25;
@@ -402,35 +410,136 @@ function fitAssetToMarket(params) {
   return 0.5*(lo+hi);
 }
 
+/* -------------------------- Market data (Stooq) -------------------------- */
+/**
+ * Stooq "last quote" endpoint returns CSV. Examples:
+ * https://stooq.com/q/l/?s=spy.us&i=d
+ * https://stooq.com/q/l/?s=vix&i=d
+ * https://stooq.com/q/l/?s=us10y&i=d
+ *
+ * We'll parse the last row:
+ * Date,Open,High,Low,Close,Volume
+ */
+async function fetchStooqClose(symbol) {
+  const url = `https://stooq.com/q/l/?s=${encodeURIComponent(symbol)}&i=d`;
+  const txt = await fetch(url, {cache:"no-store"}).then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  });
+
+  const lines = txt.trim().split(/\r?\n/);
+  if (lines.length < 2) throw new Error("Bad CSV");
+  const header = lines[0].split(",");
+  const last = lines[lines.length - 1].split(",");
+  const obj = {};
+  header.forEach((h,i)=> obj[h.trim()] = last[i]);
+  const close = Number(obj["Close"]);
+  const date = obj["Date"];
+  if (!Number.isFinite(close)) throw new Error("No close");
+  return {close, date};
+}
+
+async function loadMarketDataIntoForm() {
+  const status = document.getElementById("marketStatus");
+  status.textContent = "Market data: loading…";
+
+  try {
+    // SPY (proxy for market level), VIX (vol proxy), US10Y (rate proxy)
+    const [spy, vix, y10] = await Promise.all([
+      fetchStooqClose("spy.us"),
+      fetchStooqClose("vix"),
+      fetchStooqClose("us10y")
+    ]);
+
+    // Map into model inputs (heuristics):
+    // - r: 10y yield reported as % (often). Convert to decimal.
+    // - sigmaA: VIX% -> decimal (rough proxy for annualized equity vol; not perfect for asset vol)
+    // - E*: scale SPY close into your model units. We'll set E* = SPY*10 by default to be in the thousands.
+    const r = (y10.close / 100);
+    const sigmaA = (vix.close / 100);
+    const E_mkt = spy.close * 10;
+
+    document.getElementById("r").value = r.toFixed(3);
+    document.getElementById("sigmaA").value = sigmaA.toFixed(3);
+    document.getElementById("E_mkt").value = Math.round(E_mkt);
+
+    // Suggest a starting capital structure (totally heuristic):
+    // D around 1.2x equity, A* around D+E.
+    const D = 1.2 * E_mkt;
+    document.getElementById("D").value = Math.round(D);
+    document.getElementById("Astar").value = Math.round(D + E_mkt);
+
+    // Expand asset range around A*
+    const Astar = Number(document.getElementById("Astar").value);
+    document.getElementById("Amin").value = Math.max(10, Math.round(0.25 * Astar));
+    document.getElementById("Amax").value = Math.round(2.0 * Astar);
+
+    status.textContent = `Market data: SPY ${spy.close.toFixed(2)} (×10), VIX ${vix.close.toFixed(2)}%, US10Y ${y10.close.toFixed(2)}%`;
+    status.classList.remove("warn");
+
+    run();
+  } catch (e) {
+    status.textContent = `Market data: failed (${e.message})`;
+    status.classList.add("warn");
+  }
+}
+
 /* --------------------------------- App ---------------------------------- */
 
 function readParams() {
-  const get = (id) => Number(document.getElementById(id).value);
+  const getN = (id) => Number(document.getElementById(id).value);
+  const getR = (id) => Number(document.getElementById(id).value);
+  const shock = Number(document.getElementById("shock").value);
+  const showYield = document.getElementById("showYield").checked;
+
   return {
-    T: get("T"),
-    r: get("r"),
-    D: get("D"),
-    sigmaA: get("sigmaA"),
-    shock: get("shock"),
-    E_mkt: get("E_mkt"),
-    Amin: get("Amin"),
-    Amax: get("Amax"),
-    k: Math.max(30, Math.floor(get("k"))),
-    Astar: get("Astar")
+    T: getN("T"),
+    r: getR("r"),
+    D: getN("D"),
+    sigmaA: getN("sigmaA"),
+    shock,
+    E_mkt: getN("E_mkt"),
+    Amin: getN("Amin"),
+    Amax: getN("Amax"),
+    k: Math.max(30, Math.floor(getN("k"))),
+    Astar: getN("Astar"),
+    showYield
   };
+}
+
+function renderReadout(params, snap) {
+  const ro = document.getElementById("readout");
+  const {T,r,D,sigmaA,Astar,E_mkt} = params;
+
+  ro.innerHTML = `
+    ${kv("A*", fmtNum(Astar))}
+    ${kv("E(A*)", fmtNum(snap.E_star, 2))}
+    ${kv("E* (market)", fmtNum(E_mkt, 2))}
+    ${kv("Default Prob @ A*", fmtPct(snap.pd_star, 2))}
+    ${kv("Equity Vol σE @ A*", fmtPct(snap.volE_star, 2))}
+    ${kv("Debt Yield y @ A*", fmtPct(snap.y_star, 2))}
+    ${kv("Credit Spread (y − r) @ A*", fmtPct(snap.spr_star, 2))}
+    ${kv("Inputs", `T=${fmt(T,2)}, r=${fmtPct(r,2)}, D=${fmtNum(D)}, σA=${fmtPct(sigmaA,2)}`)}
+  `;
+}
+
+function kv(k, v) {
+  return `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`;
 }
 
 function run() {
   const params = readParams();
   const {panels, snapshot} = buildCurves(params);
 
+  document.getElementById("c4title").textContent = params.showYield
+    ? "Debt Yield vs Equity Value"
+    : "Credit Spread vs Equity Value";
+
   for (const p of panels) {
     const el = document.getElementById(p.id);
     renderLineChart(el, p, {width: el.parentElement.clientWidth - 20, height: 320});
   }
-
-  // Optional: reflect some computed values (console)
-  console.log("Snapshot @ A*:", snapshot);
+  renderReadout(params, snapshot);
 }
 
 document.getElementById("run").addEventListener("click", run);
@@ -439,14 +548,25 @@ document.getElementById("fit").addEventListener("click", () => {
   const params = readParams();
   const Afit = fitAssetToMarket(params);
   if (Afit == null) {
-    alert("Could not bracket a solution for A* in [Amin, Amax]. Try widening the asset range.");
+    alert("Could not bracket a solution for A* in [Amin, Amax]. Try widening the asset range or changing D/σA.");
     return;
   }
   document.getElementById("Astar").value = Math.round(Afit);
   run();
 });
 
+document.getElementById("shock").addEventListener("input", (e) => {
+  document.getElementById("shockVal").textContent = Number(e.target.value).toFixed(3);
+  // live update feels great:
+  run();
+});
+
+document.getElementById("showYield").addEventListener("change", run);
+
+document.getElementById("loadMkt").addEventListener("click", loadMarketDataIntoForm);
+
 // initial render
+document.getElementById("shockVal").textContent = Number(document.getElementById("shock").value).toFixed(3);
 run();
 </script>
 </body>
